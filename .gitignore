@@ -1,0 +1,14 @@
+.DS_Store
+._*
+.vscode/
+.idea/
+.wrangler/
+.dev.vars
+node_modules/
+*.ARW
+*.arw
+*.CR2
+*.NEF
+*.DNG
+*_adj.jpg
+/samples/

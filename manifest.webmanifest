@@ -1,0 +1,17 @@
+{
+  "name": "光あわせ — 露出調整",
+  "short_name": "光あわせ",
+  "description": "ブラウザだけで動く露出調整ツール。JPEGとRAWの埋め込みプレビューに対応。",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#e7eaed",
+  "theme_color": "#e7eaed",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "./icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

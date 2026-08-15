@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>光あわせ — 露出調整</title>
+<meta name="description" content="ブラウザだけで動く露出調整ツール。JPEGとRAWの埋め込みプレビューを、リニア光で正確に露出補正。画像は端末外に送信されません。">
+<meta name="theme-color" content="#e7eaed">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="光あわせ">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/icon-192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="光あわせ — 露出調整">
+<meta property="og:description" content="ブラウザだけで動く露出調整ツール。RAWの埋め込みプレビューにも対応。">
+<meta property="og:image" content="./icons/icon-512.png">
+<style>
+  :root{
+    color-scheme: light only;
+    --ink:#14171a;
+    --ink-2:#5a626b;
+    --ink-3:#8b939c;
+    --paper:#e7eaed;
+    --panel:#ffffff;
+    --line:#c9d0d7;
+    --line-2:#e2e6ea;
+    --clip-hi:#e0331f;
+    --clip-lo:#2160d8;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--sans); -webkit-text-size-adjust:100%;
+    overscroll-behavior:none;
+  }
+  .app{
+    height:100dvh; display:grid;
+    grid-template-rows: minmax(0,1fr) auto;
+  }
+  @media (min-width:900px){
+    .app{ grid-template-rows:none; grid-template-columns: minmax(0,1fr) 372px; }
+  }
+
+  /* ---------- stage ---------- */
+  .stage{
+    position:relative; min-height:0; display:flex;
+    align-items:center; justify-content:center;
+    background:#808080; overflow:hidden;
+    touch-action:manipulation;
+  }
+  .stage[data-bg="white"]{background:#fff}
+  .stage[data-bg="black"]{background:#000}
+  #view{ max-width:100%; max-height:100%; display:none; user-select:none; -webkit-user-drag:none; }
+  .stage.loaded #view{display:block}
+  .stage.dragover{outline:2px dashed #fff; outline-offset:-10px}
+
+  .empty{
+    text-align:center; color:#f2f2f2; padding:24px; max-width:340px;
+    text-shadow:0 1px 2px rgba(0,0,0,.35);
+  }
+  .stage.loaded .empty{display:none}
+  .empty b{display:block; font-size:17px; font-weight:650; margin-bottom:6px}
+  .empty span{font-size:13px; line-height:1.7; color:#e2e2e2}
+
+  .stagebar{
+    position:absolute; left:10px; bottom:10px; display:flex; gap:6px;
+  }
+  .chip{
+    font:500 11px/1 var(--sans); letter-spacing:.08em;
+    background:rgba(255,255,255,.86); color:var(--ink);
+    border:1px solid rgba(0,0,0,.12); border-radius:2px;
+    padding:7px 9px; cursor:pointer;
+  }
+  .chip[aria-pressed="true"]{background:var(--ink); color:#fff; border-color:var(--ink)}
+  .hint{
+    position:absolute; right:10px; bottom:10px;
+    font:400 10px/1 var(--sans); letter-spacing:.06em;
+    color:rgba(255,255,255,.8); text-shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+  .stage:not(.loaded) .stagebar,.stage:not(.loaded) .hint{display:none}
+
+  /* ---------- panel ---------- */
+  .panel{
+    background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0;
+    max-height:58dvh;
+  }
+  @media (min-width:900px){
+    .panel{ border-top:none; border-left:1px solid var(--line); max-height:none; }
+  }
+  .panel-scroll{overflow-y:auto; -webkit-overflow-scrolling:touch}
+
+  .toolbar{
+    display:flex; gap:6px; padding:10px;
+    border-bottom:1px solid var(--line-2); background:var(--panel);
+    position:sticky; top:0; z-index:2;
+  }
+  button.act{
+    flex:1; font:600 12px/1 var(--sans); letter-spacing:.04em;
+    padding:11px 6px; border-radius:2px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--ink);
+  }
+  button.act:hover{background:#f4f6f8}
+  button.act.primary{background:var(--ink); color:#fff; border-color:var(--ink)}
+  button.act.primary:hover{background:#2a3037}
+  button.act:disabled{opacity:.35; cursor:not-allowed}
+  button.act:focus-visible, .chip:focus-visible, input:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+
+  .brand{
+    padding:12px 14px 0; display:flex; align-items:baseline; gap:8px;
+  }
+  .brand h1{margin:0; font-size:15px; font-weight:700; letter-spacing:.14em}
+  .brand span{font:400 10px/1 var(--mono); color:var(--ink-3); letter-spacing:.1em}
+
+  /* ---------- meter block ---------- */
+  .meter{padding:10px 14px 14px; border-bottom:1px solid var(--line-2)}
+  #hist{width:100%; height:88px; display:block; background:#fbfcfd; border:1px solid var(--line-2)}
+
+  .readout{
+    display:flex; justify-content:space-between; align-items:baseline;
+    margin-top:9px; font-family:var(--mono); font-size:11px; color:var(--ink-2);
+  }
+  .readout .ev{font-size:19px; color:var(--ink); letter-spacing:-.02em}
+  .clips{display:flex; gap:12px; font-size:11px}
+  .clips i{font-style:normal; display:inline-block; width:7px; height:7px; margin-right:4px; border-radius:1px; vertical-align:1px}
+  .clips .hi i{background:var(--clip-hi)} .clips .lo i{background:var(--clip-lo)}
+
+  /* exposure compensation scale */
+  .scale{position:relative; height:26px; margin-top:8px}
+  .scale .rail{position:absolute; left:0; right:0; top:15px; height:1px; background:var(--line)}
+  .scale .tick{position:absolute; top:11px; width:1px; height:5px; background:var(--ink-3); transform:translateX(-.5px)}
+  .scale .tick.major{top:8px; height:9px; background:var(--ink-2)}
+  .scale .num{position:absolute; top:16px; transform:translateX(-50%); font:400 9px/1 var(--mono); color:var(--ink-3)}
+  .needle{
+    position:absolute; top:0; width:0; height:0; transform:translateX(-5px);
+    border-left:5px solid transparent; border-right:5px solid transparent;
+    border-top:8px solid var(--ink); transition:left .06s linear;
+  }
+  @media (prefers-reduced-motion:reduce){ .needle{transition:none} }
+
+  /* ---------- sliders ---------- */
+  .controls{padding:6px 14px 16px}
+  .row{padding:9px 0 4px}
+  .row .top{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:3px}
+  .row label{font:600 11px/1 var(--sans); letter-spacing:.12em; color:var(--ink-2)}
+  .row output{font:500 12px/1 var(--mono); color:var(--ink)}
+  .row.zero output{color:var(--ink-3)}
+
+  input[type=range]{
+    -webkit-appearance:none; appearance:none; width:100%; height:22px;
+    background:transparent; margin:0; cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track{height:2px; background:var(--line); border-radius:1px}
+  input[type=range]::-moz-range-track{height:2px; background:var(--line); border-radius:1px}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:15px; height:15px; border-radius:50%;
+    background:var(--ink); border:2px solid #fff; box-shadow:0 0 0 1px var(--ink);
+    margin-top:-6.5px;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:15px; height:15px; border-radius:50%; border:2px solid #fff;
+    background:var(--ink); box-shadow:0 0 0 1px var(--ink);
+  }
+  input[type=range]:disabled::-webkit-slider-thumb{background:var(--ink-3); box-shadow:0 0 0 1px var(--ink-3)}
+  .track-wrap{position:relative}
+  .detent{position:absolute; left:50%; top:9px; width:1px; height:4px; background:var(--ink-3); pointer-events:none}
+
+  .note{
+    padding:0 14px 16px; font:400 11px/1.7 var(--sans); color:var(--ink-3);
+  }
+  .toast{
+    position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+    background:var(--ink); color:#fff; font:500 12px/1.4 var(--sans);
+    padding:10px 16px; border-radius:2px; opacity:0; pointer-events:none;
+    transition:opacity .18s ease; z-index:9; max-width:88vw; text-align:center;
+  }
+  .toast.show{opacity:1}
+  input[type=file]{display:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <section class="stage" id="stage" data-bg="grey">
+    <canvas id="view"></canvas>
+    <div class="empty">
+      <b>写真を開く</b>
+      <span>下の「写真を開く」から選ぶか、ここにドラッグ＆ドロップ。<br>JPEG・HEIC と、RAW（ARW/CR2/NEF/DNG ほか）の埋め込みプレビューに対応。<br>画像はブラウザ内だけで処理され、どこにも送信されません。</span>
+    </div>
+    <div class="stagebar">
+      <button class="chip" id="bgBtn">背景 グレー</button>
+      <button class="chip" id="clipBtn" aria-pressed="false">クリップ表示</button>
+    </div>
+    <div class="hint">押している間だけ元画像</div>
+  </section>
+
+  <aside class="panel">
+    <div class="toolbar">
+      <button class="act" id="openBtn">写真を開く</button>
+      <button class="act" id="autoBtn" disabled>自動</button>
+      <button class="act" id="resetBtn" disabled>リセット</button>
+      <button class="act primary" id="saveBtn" disabled>書き出し</button>
+    </div>
+    <div class="panel-scroll">
+      <div class="brand"><h1>光あわせ</h1><span>EXPOSURE BENCH</span></div>
+
+      <div class="meter">
+        <canvas id="hist" width="680" height="176"></canvas>
+        <div class="readout">
+          <div class="ev" id="evOut">±0.00 EV</div>
+          <div class="clips">
+            <span class="hi"><i></i><span id="clipHi">0.0%</span></span>
+            <span class="lo"><i></i><span id="clipLo">0.0%</span></span>
+          </div>
+        </div>
+        <div class="scale" id="scale">
+          <div class="rail"></div>
+          <div class="needle" id="needle" style="left:50%"></div>
+        </div>
+      </div>
+
+      <div class="controls" id="controls"></div>
+      <p class="note">書き出しは JPEG（品質92）。元ファイルは書き換えません。<br>RAWは埋め込みプレビュー（8bit JPEG）を読みます。RAW本来の階調余裕は使えないので、白飛びの救済は Resolve など現像ソフトで。</p>
+    </div>
+  </aside>
+</div>
+
+<input type="file" id="file" accept="image/*,.arw,.sr2,.cr2,.cr3,.nef,.nrw,.dng,.orf,.rw2,.raf,.pef,.srw">
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const stage=$('#stage'), view=$('#view'), vctx=view.getContext('2d',{willReadFrequently:true});
+  const hist=$('#hist'), hctx=hist.getContext('2d');
+  const fileInput=$('#file'), toastEl=$('#toast');
+
+  const PARAMS=[
+    {k:'ev',   name:'露出',     min:-3, max:3, step:0.05, unit:'EV'},
+    {k:'hl',   name:'ハイライト', min:-100, max:100, step:1},
+    {k:'sh',   name:'シャドウ',   min:-100, max:100, step:1},
+    {k:'ct',   name:'コントラスト', min:-100, max:100, step:1},
+    {k:'sat',  name:'彩度',     min:-100, max:100, step:1},
+    {k:'temp', name:'色温度',    min:-100, max:100, step:1},
+  ];
+  const state={ev:0,hl:0,sh:0,ct:0,sat:0,temp:0};
+  let bitmap=null, srcData=null, outData=null, fileName='photo', showClip=false, comparing=false;
+
+  /* ---------- build sliders ---------- */
+  const inputs={};
+  const wrap=$('#controls');
+  PARAMS.forEach(p=>{
+    const row=document.createElement('div'); row.className='row zero';
+    row.innerHTML=`<div class="top"><label for="s_${p.k}">${p.name}</label><output id="o_${p.k}">0</output></div>
+      <div class="track-wrap"><div class="detent"></div>
+      <input type="range" id="s_${p.k}" min="${p.min}" max="${p.max}" step="${p.step}" value="0" disabled></div>`;
+    wrap.appendChild(row);
+    const inp=row.querySelector('input'), out=row.querySelector('output');
+    inputs[p.k]={inp,out,row,p};
+    inp.addEventListener('input',()=>{ state[p.k]=parseFloat(inp.value); syncLabel(p.k); schedule(); });
+    inp.addEventListener('dblclick',()=>{ state[p.k]=0; inp.value=0; syncLabel(p.k); schedule(); });
+  });
+  function syncLabel(k){
+    const {inp,out,row,p}=inputs[k], v=state[k];
+    out.textContent = p.unit ? (v>0?'+':v<0?'−':'±')+Math.abs(v).toFixed(2)+' '+p.unit
+                             : (v>0?'+':'')+Math.round(v);
+    row.classList.toggle('zero', Math.abs(v)<1e-9);
+    if(parseFloat(inp.value)!==v) inp.value=v;
+  }
+  function syncAll(){ PARAMS.forEach(p=>syncLabel(p.k)); }
+
+  /* ---------- exposure scale ticks ---------- */
+  (function ticks(){
+    const sc=$('#scale');
+    for(let i=-9;i<=9;i++){
+      const t=document.createElement('div');
+      t.className='tick'+(i%3===0?' major':'');
+      t.style.left=((i+9)/18*100)+'%'; sc.appendChild(t);
+      if(i%3===0){
+        const n=document.createElement('div'); n.className='num';
+        n.style.left=((i+9)/18*100)+'%'; n.textContent=(i/3>0?'+':'')+(i/3);
+        sc.appendChild(n);
+      }
+    }
+  })();
+
+  /* ---------- color pipeline ---------- */
+  const s2l=c=> c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4);
+  const l2s=c=> c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055;
+
+  function buildLUT(){
+    const g=[1+state.temp*0.0028, 1, 1-state.temp*0.0028];
+    const ex=Math.pow(2,state.ev), sh=state.sh/100, hl=state.hl/100, ct=state.ct/100*0.7;
+    const lut=[new Uint8ClampedArray(256),new Uint8ClampedArray(256),new Uint8ClampedArray(256)];
+    for(let ch=0; ch<3; ch++){
+      for(let v=0; v<256; v++){
+        let L=s2l(v/255)*g[ch]*ex;
+        let s=l2s(Math.max(0,L));
+        const cs=Math.min(1,Math.max(0,s));
+        s += sh*0.55*Math.pow(1-cs,2.2);
+        s += hl*0.55*Math.pow(cs,2.2);
+        s = 0.5+(s-0.5)*(1+ct);
+        lut[ch][v]=s*255;
+      }
+    }
+    return lut;
+  }
+
+  function process(src, markClip){
+    const [lr,lg,lb]=buildLUT();
+    const n=src.data.length, s=src.data;
+    const dst=new ImageData(src.width, src.height), d=dst.data;
+    const k=1+state.sat/100, doSat=Math.abs(state.sat)>1e-9;
+    let hiCount=0, loCount=0;
+    for(let i=0;i<n;i+=4){
+      let r=lr[s[i]], g=lg[s[i+1]], b=lb[s[i+2]];
+      if(doSat){
+        const y=0.2126*r+0.7152*g+0.0722*b;
+        r=y+(r-y)*k; g=y+(g-y)*k; b=y+(b-y)*k;
+        r=r<0?0:r>255?255:r; g=g<0?0:g>255?255:g; b=b<0?0:b>255?255:b;
+      }
+      const blown = r>253||g>253||b>253;
+      const crush = r<2&&g<2&&b<2;
+      if(blown) hiCount++; if(crush) loCount++;
+      if(markClip && blown){ r=224; g=51; b=31; }
+      else if(markClip && crush){ r=33; g=96; b=216; }
+      d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=s[i+3];
+    }
+    const px=n/4;
+    return {img:dst, hi:hiCount/px*100, lo:loCount/px*100};
+  }
+
+  /* ---------- histogram ---------- */
+  function drawHist(img){
+    const W=hist.width, H=hist.height;
+    hctx.clearRect(0,0,W,H);
+    hctx.fillStyle='#fbfcfd'; hctx.fillRect(0,0,W,H);
+    if(!img) return;
+    const bins=[new Uint32Array(256),new Uint32Array(256),new Uint32Array(256)];
+    const d=img.data, step=Math.max(4, (Math.floor(d.length/4/220000))*4 || 4);
+    for(let i=0;i<d.length;i+=step){ bins[0][d[i]]++; bins[1][d[i+1]]++; bins[2][d[i+2]]++; }
+    let max=0;
+    for(let c=0;c<3;c++) for(let v=1;v<255;v++) if(bins[c][v]>max) max=bins[c][v];
+    if(!max) return;
+    const cols=['rgba(216,48,32,.62)','rgba(24,150,72,.62)','rgba(28,88,214,.62)'];
+    hctx.globalCompositeOperation='multiply';
+    for(let c=0;c<3;c++){
+      hctx.beginPath(); hctx.moveTo(0,H);
+      for(let v=0;v<256;v++){
+        const h=Math.min(1, Math.pow(bins[c][v]/max,0.62))*(H-6);
+        hctx.lineTo(v/255*W, H-h);
+      }
+      hctx.lineTo(W,H); hctx.closePath();
+      hctx.fillStyle=cols[c]; hctx.fill();
+    }
+    hctx.globalCompositeOperation='source-over';
+    hctx.strokeStyle='#e2e6ea'; hctx.lineWidth=2;
+    hctx.beginPath(); hctx.moveTo(W/2,0); hctx.lineTo(W/2,H); hctx.stroke();
+  }
+
+  /* ---------- render loop ---------- */
+  let queued=false;
+  function schedule(){ if(queued||!srcData) return; queued=true; requestAnimationFrame(()=>{queued=false; render();}); }
+
+  function render(){
+    if(!srcData) return;
+    const res=process(srcData, showClip);
+    outData=res.img;
+    if(!comparing) vctx.putImageData(outData,0,0);
+    drawHist(res.img);
+    $('#clipHi').textContent=res.hi.toFixed(1)+'%';
+    $('#clipLo').textContent=res.lo.toFixed(1)+'%';
+    const ev=state.ev;
+    $('#evOut').textContent=(ev>0?'+':ev<0?'−':'±')+Math.abs(ev).toFixed(2)+' EV';
+    $('#needle').style.left=((Math.max(-3,Math.min(3,ev))+3)/6*100)+'%';
+  }
+
+  /* ---------- RAW: 埋め込みJPEGプレビューの取り出し ---------- */
+  const RAW_EXT=/\.(arw|sr2|srf|cr2|cr3|nef|nrw|dng|orf|rw2|raf|pef|srw|3fr|iiq|mrw)$/i;
+  const CANVAS_LIMIT=16.0e6; // iOS Safari の canvas 面積上限
+
+  function readOrientationTIFF(u8, off){
+    if(off+8>u8.length) return 0;
+    const le=u8[off]===0x49&&u8[off+1]===0x49, be=u8[off]===0x4D&&u8[off+1]===0x4D;
+    if(!le&&!be) return 0;
+    const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+    const g16=p=>dv.getUint16(p,le), g32=p=>dv.getUint32(p,le);
+    try{
+      if(g16(off+2)!==42) return 0;
+      const ifd=off+g32(off+4);
+      if(ifd+2>u8.length) return 0;
+      const n=g16(ifd);
+      for(let k=0;k<n && ifd+2+k*12+12<=u8.length;k++){
+        const e=ifd+2+k*12;
+        if(g16(e)===0x0112) return g16(e+8);
+      }
+    }catch(err){}
+    return 0;
+  }
+
+  function jpegHasOrientation(u8, start){
+    let p=start+2;
+    while(p<u8.length-4 && u8[p]===0xFF){
+      const m=u8[p+1];
+      if(m===0x01||(m>=0xD0&&m<=0xD8)){ p+=2; continue; }
+      if(m===0xDA) break;
+      const len=(u8[p+2]<<8)|u8[p+3];
+      if(len<2) break;
+      if(m===0xE1 && u8[p+4]===0x45&&u8[p+5]===0x78&&u8[p+6]===0x69&&u8[p+7]===0x66){
+        return readOrientationTIFF(u8,p+10)>0;
+      }
+      p+=2+len;
+    }
+    return false;
+  }
+
+  async function extractPreview(buf){
+    const u8=new Uint8Array(buf);
+    const sois=[], eois=[];
+    for(let i=0;i<u8.length-3;i++){
+      if(u8[i]!==0xFF) continue;
+      const b=u8[i+1];
+      if(b===0xD8 && u8[i+2]===0xFF){
+        const m=u8[i+3];
+        if(m===0xE0||m===0xE1||m===0xDB||m===0xEE||m===0xC0||m===0xC4||m===0xFE) sois.push(i);
+      }else if(b===0xD9) eois.push(i+2);
+    }
+    if(!sois.length||!eois.length) return null;
+    const cands=[];
+    let e=0;
+    for(const s of sois){
+      while(e<eois.length && eois[e]<=s+4) e++;
+      if(e>=eois.length) break;
+      const end=eois[e];
+      if(end-s>30000) cands.push([s,end]);
+    }
+    cands.sort((a,b)=>(b[1]-b[0])-(a[1]-a[0]));
+    const containerOri=readOrientationTIFF(u8,0);
+    for(const c of cands.slice(0,4)){
+      try{
+        const blob=new Blob([u8.slice(c[0],c[1])],{type:'image/jpeg'});
+        const bm=await createImageBitmap(blob,{imageOrientation:'from-image'});
+        if(bm.width<400||bm.height<400) continue;
+        return {bitmap:bm, orientation: jpegHasOrientation(u8,c[0]) ? 1 : (containerOri||1)};
+      }catch(err){}
+    }
+    return null;
+  }
+
+  function orient(bm,o){
+    let w=bm.width,h=bm.height;
+    const sc=Math.min(1,Math.sqrt(CANVAS_LIMIT/(w*h)));
+    w=Math.round(w*sc); h=Math.round(h*sc);
+    const swap=o>=5&&o<=8;
+    const c=document.createElement('canvas');
+    c.width=swap?h:w; c.height=swap?w:h;
+    const x=c.getContext('2d');
+    switch(o){
+      case 2: x.translate(w,0); x.scale(-1,1); break;
+      case 3: x.translate(w,h); x.rotate(Math.PI); break;
+      case 4: x.translate(0,h); x.scale(1,-1); break;
+      case 5: x.rotate(0.5*Math.PI); x.scale(1,-1); break;
+      case 6: x.rotate(0.5*Math.PI); x.translate(0,-h); break;
+      case 7: x.rotate(0.5*Math.PI); x.translate(w,-h); x.scale(-1,1); break;
+      case 8: x.rotate(-0.5*Math.PI); x.translate(-w,0); break;
+    }
+    x.drawImage(bm,0,0,w,h);
+    if(bm.close) bm.close();
+    return c;
+  }
+
+  /* ---------- loading ---------- */
+  async function load(file){
+    if(!file) return;
+    const isRaw = RAW_EXT.test(file.name||'') || !((file.type||'').startsWith('image/'));
+    fileName=(file.name||'photo').replace(/\.[^.]+$/,'');
+    let bm=null, ori=1, fromRaw=false;
+    if(isRaw){
+      toast('RAWからプレビューを取り出し中…');
+      await new Promise(r=>setTimeout(r,24));
+      let res=null;
+      try{ res=await extractPreview(await file.arrayBuffer()); }catch(err){}
+      if(!res){ toast('このファイルからは埋め込みプレビューを取り出せませんでした'); return; }
+      bm=res.bitmap; ori=res.orientation; fromRaw=true;
+    }else{
+      try{
+        bm=await createImageBitmap(file,{imageOrientation:'from-image'});
+      }catch(e){
+        try{
+          const url=URL.createObjectURL(file);
+          bm=await new Promise((res,rej)=>{const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=url;});
+        }catch(e2){ toast('画像を読み込めませんでした'); return; }
+      }
+    }
+    if(ori>1) bm=orient(bm,ori);
+    if(bitmap && bitmap.close) bitmap.close();
+    bitmap=bm;
+    const maxDim=window.innerWidth<900?1100:1500;
+    const sc=Math.min(1, maxDim/Math.max(bitmap.width,bitmap.height));
+    const w=Math.max(1,Math.round(bitmap.width*sc)), h=Math.max(1,Math.round(bitmap.height*sc));
+    view.width=w; view.height=h;
+    vctx.drawImage(bitmap,0,0,w,h);
+    srcData=vctx.getImageData(0,0,w,h);
+    stage.classList.add('loaded');
+    ['autoBtn','resetBtn','saveBtn'].forEach(id=>$('#'+id).disabled=false);
+    Object.values(inputs).forEach(o=>o.inp.disabled=false);
+    reset(false);
+    auto();
+    if(fromRaw) toast(`RAWの埋め込みプレビューを使用　${bitmap.width}×${bitmap.height}px`);
+  }
+
+  function reset(rerender=true){
+    PARAMS.forEach(p=>{state[p.k]=0;});
+    syncAll(); if(rerender) render();
+  }
+
+  function auto(){
+    if(!srcData) return;
+    const d=srcData.data; let sum=0, cnt=0;
+    for(let i=0;i<d.length;i+=64){ // sparse sample
+      const y=(0.2126*s2l(d[i]/255)+0.7152*s2l(d[i+1]/255)+0.0722*s2l(d[i+2]/255));
+      sum+=y; cnt++;
+    }
+    const mean=Math.max(1e-4,sum/cnt);
+    let ev=Math.log2(0.16/mean);
+    ev=Math.max(-2.5,Math.min(2.5,ev));
+    state.ev=Math.round(ev*20)/20;
+    // 上げるときは白飛びを抑え、下げるときは暗部を起こす
+    state.hl = state.ev>0.15 ? -Math.round(Math.min(45,state.ev*22)) : 0;
+    state.sh = state.ev<-0.15 ? Math.round(Math.min(35,-state.ev*18)) : 0;
+    syncAll(); render();
+  }
+
+  /* ---------- export ---------- */
+  async function save(){
+    if(!bitmap) return;
+    const btn=$('#saveBtn'); btn.disabled=true; btn.textContent='書き出し中';
+    await new Promise(r=>setTimeout(r,16));
+    try{
+      const LIMIT=16.0e6;
+      let w=bitmap.width, h=bitmap.height;
+      const sc=Math.min(1, Math.sqrt(LIMIT/(w*h)));
+      w=Math.round(w*sc); h=Math.round(h*sc);
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      const cx=c.getContext('2d',{willReadFrequently:true});
+      cx.drawImage(bitmap,0,0,w,h);
+      const full=cx.getImageData(0,0,w,h);
+      cx.putImageData(process(full,false).img,0,0);
+      const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',0.92));
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob); a.download=fileName+'_adj.jpg';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+      toast(`保存しました　${w}×${h}px`);
+    }catch(e){
+      toast('書き出せませんでした。画像サイズを下げて試してください');
+    }finally{
+      btn.disabled=false; btn.textContent='書き出し';
+    }
+  }
+
+  let toastT;
+  function toast(msg){
+    toastEl.textContent=msg; toastEl.classList.add('show');
+    clearTimeout(toastT); toastT=setTimeout(()=>toastEl.classList.remove('show'),2200);
+  }
+
+  /* ---------- events ---------- */
+  $('#openBtn').onclick=()=>fileInput.click();
+  fileInput.onchange=e=>{ if(e.target.files[0]) load(e.target.files[0]); fileInput.value=''; };
+  $('#resetBtn').onclick=()=>reset();
+  $('#autoBtn').onclick=auto;
+  $('#saveBtn').onclick=save;
+
+  const bgs=[['grey','グレー'],['white','ホワイト'],['black','ブラック']];
+  let bgi=0;
+  $('#bgBtn').onclick=()=>{ bgi=(bgi+1)%3; stage.dataset.bg=bgs[bgi][0]; $('#bgBtn').textContent='背景 '+bgs[bgi][1]; };
+  $('#clipBtn').onclick=e=>{ showClip=!showClip; e.currentTarget.setAttribute('aria-pressed',showClip); render(); };
+
+  // 押している間だけ元画像
+  const showOrig=()=>{ if(!srcData) return; comparing=true; vctx.putImageData(srcData,0,0); };
+  const showAdj =()=>{ if(!comparing) return; comparing=false; if(outData) vctx.putImageData(outData,0,0); };
+  ['pointerdown'].forEach(t=>stage.addEventListener(t,e=>{ if(e.target===view) showOrig(); }));
+  ['pointerup','pointercancel','pointerleave'].forEach(t=>stage.addEventListener(t,showAdj));
+
+  // ドラッグ＆ドロップ / ペースト
+  ['dragenter','dragover'].forEach(t=>stage.addEventListener(t,e=>{e.preventDefault(); stage.classList.add('dragover');}));
+  ['dragleave','drop'].forEach(t=>stage.addEventListener(t,e=>{e.preventDefault(); stage.classList.remove('dragover');}));
+  stage.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f) load(f); });
+  window.addEventListener('paste',e=>{
+    const it=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/'));
+    if(it) load(it.getAsFile());
+  });
+
+  syncAll(); drawHist(null);
+})();
+</script>
+<script>
+  if('serviceWorker' in navigator && location.protocol==='https:'){
+    window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+  }
+</script>
+</body>
+</html>
