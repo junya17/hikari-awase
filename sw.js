@@ -1,6 +1,6 @@
 // 光あわせ — service worker
 // アプリを更新したら CACHE の版数を上げる（例: v2 → v3）
-const CACHE = 'hikari-awase-v1';
+const CACHE = 'hikari-awase-v5';
 const SHELL = [
   './',
   './index.html',

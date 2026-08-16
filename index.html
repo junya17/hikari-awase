@@ -144,8 +144,26 @@
   }
   @media (prefers-reduced-motion:reduce){ .needle{transition:none} }
 
+  /* ---------- guide ---------- */
+  .guide{padding:12px 14px 14px; border-bottom:1px solid var(--line-2); background:#f7f9fa}
+  .guide .grow{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:7px}
+  .guide .glabel{font:600 11px/1 var(--sans); letter-spacing:.14em; color:var(--ink-2)}
+  .guide select{
+    font:500 12px/1 var(--sans); color:var(--ink); background:#fff;
+    border:1px solid var(--line); border-radius:2px; padding:6px 8px; cursor:pointer;
+  }
+  .guide select:disabled{opacity:.4}
+  .gtext{margin:0; font:400 12px/1.75 var(--sans); color:var(--ink)}
+  .gmeta{margin-top:7px; font:400 10.5px/1.6 var(--mono); color:var(--ink-3); letter-spacing:.01em}
+  .gnote{margin-top:6px; font:400 10.5px/1.6 var(--sans); color:var(--ink-3)}
+
   /* ---------- sliders ---------- */
   .controls{padding:6px 14px 16px}
+  .ghead{
+    font:700 10px/1 var(--sans); letter-spacing:.18em; color:var(--ink-3);
+    margin:16px 0 2px; padding-top:12px; border-top:1px solid var(--line-2);
+  }
+  .ghead:first-child{margin-top:6px; padding-top:0; border-top:none}
   .row{padding:9px 0 4px}
   .row .top{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:3px}
   .row label{font:600 11px/1 var(--sans); letter-spacing:.12em; color:var(--ink-2)}
@@ -216,12 +234,32 @@
           <div class="clips">
             <span class="hi"><i></i><span id="clipHi">0.0%</span></span>
             <span class="lo"><i></i><span id="clipLo">0.0%</span></span>
+            <span id="meanOut">平均 —</span>
           </div>
         </div>
         <div class="scale" id="scale">
           <div class="rail"></div>
           <div class="needle" id="needle" style="left:50%"></div>
         </div>
+      </div>
+
+      <div class="guide">
+        <div class="grow">
+          <div class="glabel">めやす</div>
+          <select id="sceneSel" disabled>
+            <option value="auto">EXIFから自動判定</option>
+            <option value="day">日中・順光</option>
+            <option value="cloud">曇天・日陰</option>
+            <option value="slant">斜光（夕方前）</option>
+            <option value="magic">マジックアワー</option>
+            <option value="blue">薄明・ブルーアワー</option>
+            <option value="night">夜</option>
+            <option value="back">逆光・海面反射</option>
+          </select>
+        </div>
+        <p class="gtext" id="gtext">写真を開くと、撮影時刻と露出値から目安を出します。</p>
+        <div class="gmeta" id="gmeta"></div>
+        <div class="gnote">％はリニア輝度（反射率）。18％＝画面上では中間グレー。</div>
       </div>
 
       <div class="controls" id="controls"></div>
@@ -241,20 +279,30 @@
   const fileInput=$('#file'), toastEl=$('#toast');
 
   const PARAMS=[
-    {k:'ev',   name:'露出',     min:-3, max:3, step:0.05, unit:'EV'},
+    {k:'ev',   name:'露出',     min:-3, max:3, step:0.05, unit:'EV', group:'トーン'},
     {k:'hl',   name:'ハイライト', min:-100, max:100, step:1},
     {k:'sh',   name:'シャドウ',   min:-100, max:100, step:1},
+    {k:'wh',   name:'白レベル',   min:-100, max:100, step:1},
+    {k:'bk',   name:'黒レベル',   min:-100, max:100, step:1},
     {k:'ct',   name:'コントラスト', min:-100, max:100, step:1},
+    {k:'vib',  name:'自然な彩度', min:-100, max:100, step:1, group:'色'},
     {k:'sat',  name:'彩度',     min:-100, max:100, step:1},
     {k:'temp', name:'色温度',    min:-100, max:100, step:1},
+    {k:'tint', name:'ティント',   min:-100, max:100, step:1},
   ];
-  const state={ev:0,hl:0,sh:0,ct:0,sat:0,temp:0};
+  const state={ev:0,hl:0,sh:0,wh:0,bk:0,ct:0,vib:0,sat:0,temp:0,tint:0};
   let bitmap=null, srcData=null, outData=null, fileName='photo', showClip=false, comparing=false;
+  let exif=null, scene=null, sceneKey='day', targetMean=0.18, curMean=0.18;
 
   /* ---------- build sliders ---------- */
   const inputs={};
   const wrap=$('#controls');
   PARAMS.forEach(p=>{
+    if(p.group){
+      const g=document.createElement('div');
+      g.className='ghead'; g.textContent=p.group;
+      wrap.appendChild(g);
+    }
     const row=document.createElement('div'); row.className='row zero';
     row.innerHTML=`<div class="top"><label for="s_${p.k}">${p.name}</label><output id="o_${p.k}">0</output></div>
       <div class="track-wrap"><div class="detent"></div>
@@ -294,16 +342,28 @@
   const l2s=c=> c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055;
 
   function buildLUT(){
+    // 色温度: R と B を逆方向に / ティント: G を動かし R・B でわずかに戻す
     const g=[1+state.temp*0.0028, 1, 1-state.temp*0.0028];
-    const ex=Math.pow(2,state.ev), sh=state.sh/100, hl=state.hl/100, ct=state.ct/100*0.7;
+    g[1] *= 1 - state.tint*0.0025;
+    g[0] *= 1 + state.tint*0.0009;
+    g[2] *= 1 + state.tint*0.0009;
+    const ex=Math.pow(2,state.ev);
+    const sh=state.sh/100, hl=state.hl/100;
+    const wh=state.wh/100, bk=state.bk/100, ct=state.ct/100*0.7;
+    const k=-bk*0.22; // 黒レベル: 黒点そのものを動かす
     const lut=[new Uint8ClampedArray(256),new Uint8ClampedArray(256),new Uint8ClampedArray(256)];
     for(let ch=0; ch<3; ch++){
       for(let v=0; v<256; v++){
         let L=s2l(v/255)*g[ch]*ex;
         let s=l2s(Math.max(0,L));
         const cs=Math.min(1,Math.max(0,s));
-        s += sh*0.55*Math.pow(1-cs,2.2);
-        s += hl*0.55*Math.pow(cs,2.2);
+        // ハイライト/シャドウは中間寄りの帯だけを動かす（端点は動かさない）
+        const d=1-cs;
+        s += sh*0.60*(d*d)*(1-Math.pow(d,6));
+        s += hl*0.60*(cs*cs)*(1-Math.pow(cs,6));
+        // 白レベル/黒レベルはクリップ点そのものを動かす
+        s *= 1+wh*0.35;
+        s = (s-k)/(1-k);
         s = 0.5+(s-0.5)*(1+ct);
         lut[ch][v]=s*255;
       }
@@ -315,12 +375,26 @@
     const [lr,lg,lb]=buildLUT();
     const n=src.data.length, s=src.data;
     const dst=new ImageData(src.width, src.height), d=dst.data;
-    const k=1+state.sat/100, doSat=Math.abs(state.sat)>1e-9;
+    const ks=1+state.sat/100, kv=state.vib/100;
+    const doSat=Math.abs(state.sat)>1e-9, doVib=Math.abs(state.vib)>1e-9;
     let hiCount=0, loCount=0;
     for(let i=0;i<n;i+=4){
       let r=lr[s[i]], g=lg[s[i+1]], b=lb[s[i+2]];
-      if(doSat){
+      if(doSat||doVib){
         const y=0.2126*r+0.7152*g+0.0722*b;
+        let k=ks;
+        if(doVib){
+          const mx=r>g?(r>b?r:b):(g>b?g:b);
+          const mn=r<g?(r<b?r:b):(g<b?g:b);
+          const sv=mx>1?(mx-mn)/mx:0;
+          // 上げるときは低彩度ほど強く、下げるときは高彩度ほど強く
+          let w = kv>0 ? (1-sv)*(1-sv) : sv;
+          if(kv>0 && mx>mn && mx===r && g>=b){
+            const hue=60*(g-b)/(mx-mn);
+            if(hue>8&&hue<52) w*=0.35;   // 肌・木肌の帯は控えめに
+          }
+          k *= 1+kv*w*1.3;
+        }
         r=y+(r-y)*k; g=y+(g-y)*k; b=y+(b-y)*k;
         r=r<0?0:r>255?255:r; g=g<0?0:g>255?255:g; b=b<0?0:b>255?255:b;
       }
@@ -344,15 +418,30 @@
     const bins=[new Uint32Array(256),new Uint32Array(256),new Uint32Array(256)];
     const d=img.data, step=Math.max(4, (Math.floor(d.length/4/220000))*4 || 4);
     for(let i=0;i<d.length;i+=step){ bins[0][d[i]]++; bins[1][d[i+1]]++; bins[2][d[i+2]]++; }
+    // 8bit画像をEV補正すると出力値に隙間ができ櫛状になる。表示だけ均す（データは変えない）
+    const W5=[1,2,3,2,1];
+    const smooth=b=>{
+      const o=new Float32Array(256);
+      for(let v=0;v<256;v++){
+        let s=0,w=0;
+        for(let k=-2;k<=2;k++){
+          const j=v+k; if(j<0||j>255) continue;
+          s+=b[j]*W5[k+2]; w+=W5[k+2];
+        }
+        o[v]=s/w;
+      }
+      return o;
+    };
+    const sb=[smooth(bins[0]),smooth(bins[1]),smooth(bins[2])];
     let max=0;
-    for(let c=0;c<3;c++) for(let v=1;v<255;v++) if(bins[c][v]>max) max=bins[c][v];
+    for(let c=0;c<3;c++) for(let v=1;v<255;v++) if(sb[c][v]>max) max=sb[c][v];
     if(!max) return;
     const cols=['rgba(216,48,32,.62)','rgba(24,150,72,.62)','rgba(28,88,214,.62)'];
     hctx.globalCompositeOperation='multiply';
     for(let c=0;c<3;c++){
       hctx.beginPath(); hctx.moveTo(0,H);
       for(let v=0;v<256;v++){
-        const h=Math.min(1, Math.pow(bins[c][v]/max,0.62))*(H-6);
+        const h=Math.min(1, Math.pow(sb[c][v]/max,0.62))*(H-6);
         hctx.lineTo(v/255*W, H-h);
       }
       hctx.lineTo(W,H); hctx.closePath();
@@ -361,6 +450,46 @@
     hctx.globalCompositeOperation='source-over';
     hctx.strokeStyle='#e2e6ea'; hctx.lineWidth=2;
     hctx.beginPath(); hctx.moveTo(W/2,0); hctx.lineTo(W/2,H); hctx.stroke();
+    // 目標（破線）と現在の平均（実線）
+    const tx=l2s(Math.min(1,targetMean))*W, cx2=l2s(Math.min(1,curMean))*W;
+    hctx.strokeStyle='#8b939c'; hctx.lineWidth=2; hctx.setLineDash([5,4]);
+    hctx.beginPath(); hctx.moveTo(tx,0); hctx.lineTo(tx,H); hctx.stroke();
+    hctx.setLineDash([]);
+    hctx.strokeStyle='#14171a'; hctx.lineWidth=2;
+    hctx.beginPath(); hctx.moveTo(cx2,0); hctx.lineTo(cx2,H); hctx.stroke();
+    hctx.fillStyle='#14171a';
+    hctx.beginPath(); hctx.moveTo(cx2-5,0); hctx.lineTo(cx2+5,0); hctx.lineTo(cx2,7); hctx.fill();
+  }
+
+  /* ---------- めやす表示 ---------- */
+  function meanLinear(img){
+    const d=img.data; let sum=0,cnt=0;
+    const step=Math.max(4,(Math.floor(d.length/4/60000))*4||4);
+    for(let i=0;i<d.length;i+=step){
+      sum += 0.2126*s2l(d[i]/255)+0.7152*s2l(d[i+1]/255)+0.0722*s2l(d[i+2]/255);
+      cnt++;
+    }
+    return cnt? sum/cnt : 0.18;
+  }
+
+  function updateGuide(){
+    const sel=$('#sceneSel').value;
+    const key = sel==='auto' ? (scene? scene.key : 'day') : sel;
+    sceneKey=key;
+    const s=SCENES[key];
+    targetMean=s.target;
+    const parts=[];
+    parts.push(`<b>${s.name}</b>　平均 ${(s.target*100).toFixed(0)}% を目安に、白飛びは ${s.hiTol.toFixed(1)}% まで。`);
+    parts.push(s.tip);
+    $('#gtext').innerHTML=parts.join('<br>');
+    const meta=[];
+    if(exif&&exif.localTime) meta.push(exif.localTime);
+    if(scene) meta.push(`太陽高度 ${scene.el>=0?'+':'−'}${Math.abs(scene.el).toFixed(1)}°`);
+    if(exif&&exif.ev100!=null) meta.push(`EV${exif.ev100.toFixed(1)}`);
+    if(scene&&scene.light) meta.push(scene.light);
+    if(scene&&!scene.hasGps) meta.push('GPSなし→福津で計算');
+    if(!exif||!exif.when) meta.push('EXIFなし→手動で選択');
+    $('#gmeta').textContent=meta.join('　/　');
   }
 
   /* ---------- render loop ---------- */
@@ -372,12 +501,163 @@
     const res=process(srcData, showClip);
     outData=res.img;
     if(!comparing) vctx.putImageData(outData,0,0);
+    curMean=meanLinear(res.img);
     drawHist(res.img);
     $('#clipHi').textContent=res.hi.toFixed(1)+'%';
     $('#clipLo').textContent=res.lo.toFixed(1)+'%';
+    const over = res.hi > SCENES[sceneKey].hiTol;
+    $('#clipHi').style.color = over ? '#e0331f' : '';
+    $('#meanOut').textContent=`平均 ${(curMean*100).toFixed(0)}% / 目標 ${(targetMean*100).toFixed(0)}%`;
     const ev=state.ev;
     $('#evOut').textContent=(ev>0?'+':ev<0?'−':'±')+Math.abs(ev).toFixed(2)+' EV';
     $('#needle').style.left=((Math.max(-3,Math.min(3,ev))+3)/6*100)+'%';
+  }
+
+  /* ---------- EXIF ---------- */
+  const TSIZE={1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8};
+
+  function findTiff(u8){
+    if((u8[0]===0x49&&u8[1]===0x49)||(u8[0]===0x4D&&u8[1]===0x4D)) return 0;
+    if(u8[0]===0xFF&&u8[1]===0xD8){
+      let p=2;
+      while(p<u8.length-4 && u8[p]===0xFF){
+        const m=u8[p+1];
+        if(m===0x01||(m>=0xD0&&m<=0xD8)){p+=2;continue;}
+        if(m===0xDA) break;
+        const len=(u8[p+2]<<8)|u8[p+3]; if(len<2) break;
+        if(m===0xE1 && u8[p+4]===0x45&&u8[p+5]===0x78&&u8[p+6]===0x69&&u8[p+7]===0x66) return p+10;
+        p+=2+len;
+      }
+    }
+    return -1;
+  }
+
+  function exifFrom(u8){
+    const tiff=findTiff(u8); if(tiff<0) return null;
+    const le=u8[tiff]===0x49;
+    const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+    const g16=p=>dv.getUint16(p,le), g32=p=>dv.getUint32(p,le), gs32=p=>dv.getInt32(p,le);
+    try{ if(g16(tiff+2)!==42) return null; }catch(e){ return null; }
+    const out={};
+    const val=e=>{
+      const type=g16(e+2), cnt=g32(e+4), bytes=(TSIZE[type]||1)*cnt;
+      const off = bytes<=4 ? e+8 : tiff+g32(e+8);
+      if(off<0||off+bytes>u8.length) return null;
+      if(type===2){ let s=''; for(let i=0;i<cnt-1;i++) s+=String.fromCharCode(u8[off+i]); return s.replace(/\0[\s\S]*$/,'').trim(); }
+      if(type===3) return g16(off);
+      if(type===4) return g32(off);
+      if(type===5){ const a=g32(off),b=g32(off+4); return b? a/b : 0; }
+      if(type===10){ const a=gs32(off),b=gs32(off+4); return b? a/b : 0; }
+      return null;
+    };
+    const rats=(e,n)=>{
+      const cnt=g32(e+4), off=tiff+g32(e+8), r=[];
+      if(off+8*Math.min(n,cnt)>u8.length) return null;
+      for(let i=0;i<Math.min(n,cnt);i++){ const a=g32(off+i*8),b=g32(off+i*8+4); r.push(b?a/b:0); }
+      return r;
+    };
+    const seen=new Set();
+    function walk(off,kind){
+      if(off<=0||off+2>u8.length||seen.has(off)) return;
+      seen.add(off);
+      let n; try{ n=g16(off); }catch(e){ return; }
+      if(n<1||n>1024) return;
+      for(let k=0;k<n;k++){
+        const e=off+2+k*12; if(e+12>u8.length) break;
+        const tag=g16(e);
+        if(kind==='gps'){
+          if(tag===1) out.latRef=val(e);
+          else if(tag===2) out.latD=rats(e,3);
+          else if(tag===3) out.lonRef=val(e);
+          else if(tag===4) out.lonD=rats(e,3);
+          continue;
+        }
+        switch(tag){
+          case 0x8769: walk(tiff+g32(e+8),'exif'); break;
+          case 0x8825: walk(tiff+g32(e+8),'gps'); break;
+          case 0x829A: out.exp=val(e); break;
+          case 0x829D: out.fnum=val(e); break;
+          case 0x8827: if(out.iso==null) out.iso=val(e); break;
+          case 0x9204: out.bias=val(e); break;
+          case 0x9003: out.dto=val(e); break;
+          case 0x9010: case 0x9011: out.tz=val(e); break;
+          case 0x0110: out.model=val(e); break;
+          case 0x920A: out.flen=val(e); break;
+        }
+      }
+    }
+    walk(tiff+g32(tiff+4),'0');
+    if(out.latD&&out.lonD){
+      out.lat=(out.latD[0]+out.latD[1]/60+out.latD[2]/3600)*(out.latRef==='S'?-1:1);
+      out.lon=(out.lonD[0]+out.lonD[1]/60+out.lonD[2]/3600)*(out.lonRef==='W'?-1:1);
+    }
+    if(out.exp&&out.fnum&&out.iso) out.ev100=Math.log2(out.fnum*out.fnum/out.exp)-Math.log2(out.iso/100);
+    const m=/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(out.dto||'');
+    if(m){
+      let offMin=9*60; // 撮影地の指定がなければ JST
+      const t=/^([+-])(\d{2}):(\d{2})/.exec(out.tz||'');
+      if(t) offMin=(t[1]==='-'?-1:1)*(+t[2]*60 + +t[3]);
+      out.when=new Date(Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]) - offMin*60000);
+      out.localTime=`${m[2]}/${m[3]} ${m[4]}:${m[5]}`;
+    }
+    return out;
+  }
+
+  /* ---------- 太陽高度（NOAA近似・オフライン計算） ---------- */
+  function sunElevation(date, lat, lon){
+    const R=Math.PI/180;
+    const n=date.getTime()/86400000 + 2440587.5 - 2451545.0;
+    const L=(280.460+0.9856474*n)%360;
+    const g=(357.528+0.9856003*n)%360;
+    const lam=L+1.915*Math.sin(g*R)+0.020*Math.sin(2*g*R);
+    const eps=23.439-0.0000004*n;
+    const alpha=Math.atan2(Math.cos(eps*R)*Math.sin(lam*R),Math.cos(lam*R))/R;
+    const dec=Math.asin(Math.sin(eps*R)*Math.sin(lam*R))/R;
+    const gmst=((18.697374558+24.06570982441908*n)%24+24)%24;
+    let H=(gmst*15+lon)-alpha;
+    H=((H+180)%360+360)%360-180;
+    return Math.asin(Math.sin(lat*R)*Math.sin(dec*R)+Math.cos(lat*R)*Math.cos(dec*R)*Math.cos(H*R))/R;
+  }
+
+  /* ---------- シーンごとの目標 ---------- */
+  // target: 仕上がりの平均輝度（リニア）。hiTol: 許容する白飛び面積%
+  const SCENES={
+    day:   {name:'日中・順光',      target:0.18,  hiTol:0.3, tip:'中間調を基準に。空の白飛びは抑える。'},
+    cloud: {name:'曇天・日陰',      target:0.20,  hiTol:0.2, tip:'光が平坦なので、コントラストを +10〜20 足すと締まる。'},
+    slant: {name:'斜光（夕方前）',  target:0.15,  hiTol:0.5, tip:'陰影が主役。シャドウを持ち上げすぎない。'},
+    magic: {name:'マジックアワー',  target:0.11,  hiTol:0.8, tip:'全体は暗めに置き、空の階調を優先。太陽面は飛んでよい。'},
+    blue:  {name:'薄明・ブルーアワー', target:0.07, hiTol:0.4, tip:'暗さを残す。色温度を下げると青が沈んで空気が出る。'},
+    night: {name:'夜',             target:0.045, hiTol:0.3, tip:'黒つぶれは許容。持ち上げるとノイズが立つ。'},
+    back:  {name:'逆光・海面反射',  target:0.13,  hiTol:1.2, tip:'ハイライトを −30 前後、シャドウを +20 前後が起点。'}
+  };
+
+  function classify(ex){
+    if(!ex||!ex.when) return null;
+    const lat = (ex.lat!=null? ex.lat : 33.766);   // GPSがなければ福津で計算
+    const lon = (ex.lon!=null? ex.lon : 130.463);
+    const el = sunElevation(ex.when, lat, lon);
+    let key;
+    if(el>15) key='day';
+    else if(el>5) key='slant';
+    else if(el>-0.8) key='magic';
+    else if(el>-6) key='blue';
+    else key='night';
+    // 撮影EVで光の量を読む（天気そのものではなく、実際に当たっていた光）
+    let light=null;
+    if(ex.ev100!=null){
+      const e=ex.ev100;
+      if(el>10){
+        if(e>=14.5) light='直射・硬い光';
+        else if(e>=13) light='晴れ';
+        else if(e>=11.5){ light='薄曇り'; key='cloud'; }
+        else { light='曇天・日陰'; key='cloud'; }
+      }else if(el>-6){
+        light = e>=11 ? '明るい残照' : e>=8.5 ? '薄暮の弱い光' : 'かなり暗い';
+      }else{
+        light = e>=6 ? '街明かりあり' : '暗所';
+      }
+    }
+    return {key, el, light, hasGps: ex.lat!=null};
   }
 
   /* ---------- RAW: 埋め込みJPEGプレビューの取り出し ---------- */
@@ -479,12 +759,12 @@
     if(!file) return;
     const isRaw = RAW_EXT.test(file.name||'') || !((file.type||'').startsWith('image/'));
     fileName=(file.name||'photo').replace(/\.[^.]+$/,'');
-    let bm=null, ori=1, fromRaw=false;
+    let bm=null, ori=1, fromRaw=false, buf=null;
     if(isRaw){
       toast('RAWからプレビューを取り出し中…');
       await new Promise(r=>setTimeout(r,24));
       let res=null;
-      try{ res=await extractPreview(await file.arrayBuffer()); }catch(err){}
+      try{ buf=await file.arrayBuffer(); res=await extractPreview(buf); }catch(err){}
       if(!res){ toast('このファイルからは埋め込みプレビューを取り出せませんでした'); return; }
       bm=res.bitmap; ori=res.orientation; fromRaw=true;
     }else{
@@ -496,7 +776,14 @@
           bm=await new Promise((res,rej)=>{const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=url;});
         }catch(e2){ toast('画像を読み込めませんでした'); return; }
       }
+      try{ buf=await file.arrayBuffer(); }catch(e){}
     }
+    exif = buf ? exifFrom(new Uint8Array(buf)) : null;
+    scene = classify(exif);
+    buf=null;
+    $('#sceneSel').disabled=false;
+    $('#sceneSel').value = scene ? 'auto' : 'day';
+    updateGuide();
     if(ori>1) bm=orient(bm,ori);
     if(bitmap && bitmap.close) bitmap.close();
     bitmap=bm;
@@ -527,12 +814,14 @@
       sum+=y; cnt++;
     }
     const mean=Math.max(1e-4,sum/cnt);
-    let ev=Math.log2(0.16/mean);
+    let ev=Math.log2(targetMean/mean);
     ev=Math.max(-2.5,Math.min(2.5,ev));
     state.ev=Math.round(ev*20)/20;
     // 上げるときは白飛びを抑え、下げるときは暗部を起こす
     state.hl = state.ev>0.15 ? -Math.round(Math.min(45,state.ev*22)) : 0;
     state.sh = state.ev<-0.15 ? Math.round(Math.min(35,-state.ev*18)) : 0;
+    if(sceneKey==='back'){ state.hl=Math.min(state.hl,-30); state.sh=Math.max(state.sh,20); }
+    if(sceneKey==='cloud') state.ct=15;
     syncAll(); render();
   }
 
@@ -576,6 +865,7 @@
   $('#resetBtn').onclick=()=>reset();
   $('#autoBtn').onclick=auto;
   $('#saveBtn').onclick=save;
+  $('#sceneSel').onchange=()=>{ updateGuide(); render(); };
 
   const bgs=[['grey','グレー'],['white','ホワイト'],['black','ブラック']];
   let bgi=0;
